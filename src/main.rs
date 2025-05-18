@@ -1,12 +1,9 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 use std::sync::{Arc, Mutex};
 
 use av_foundation::capture_device::AVCaptureDeviceTypeExternalUnknown;
 use av_foundation::{
     capture_device::{
-        AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDeviceFormat, AVCaptureDevicePositionUnspecified,
+        AVCaptureDevice, AVCaptureDeviceDiscoverySession, AVCaptureDevicePositionUnspecified,
         AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeExternal,
     },
     capture_input::AVCaptureDeviceInput,
@@ -16,42 +13,37 @@ use av_foundation::{
     media_format::AVMediaTypeVideo,
 };
 use core_foundation::base::TCFType;
-use core_media::{
-    format_description::{CMVideoCodecType, CMVideoFormatDescription},
-    sample_buffer::{CMSampleBuffer, CMSampleBufferRef},
-    time::CMTime,
-};
-use core_video::pixel_buffer::{
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8Planar,
-    kCVPixelFormatType_422YpCbCr8, kCVPixelFormatType_422YpCbCr8_yuvs, CVPixelBuffer, CVPixelBufferKeys,
-};
+use core_media::sample_buffer::{CMSampleBuffer, CMSampleBufferRef};
+use core_video::pixel_buffer::CVPixelBuffer;
 use dispatch2::{Queue, QueueAttribute};
 use image::{Rgb, RgbImage};
 use objc2::{
     declare_class, extern_methods, msg_send_id, mutability,
-    rc::{Allocated, Id, Retained},
+    rc::{Allocated, Id},
     runtime::ProtocolObject,
     ClassType, DeclaredClass,
 };
-use objc2_foundation::{NSArray, NSMutableArray, NSMutableDictionary, NSNumber, NSObject, NSObjectProtocol, NSString};
-use x_media::{
-    media_frame::MediaFrame,
-    video::{ColorRange, PixelFormat, VideoFormat},
-};
+use objc2_foundation::{NSMutableArray, NSObject, NSObjectProtocol, NSString};
+use x_media::media_frame::MediaFrame;
 
 fn main() {
     let devices = DeviceInfo::find_all();
-    dbg!(&devices);
     let device_info = devices.first().unwrap();
+    println!("Using {}", device_info.name);
     let handler = Handler::default();
 
     let mut capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
 
-    std::thread::sleep(std::time::Duration::from_secs(1));
-
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if handler.image_set() {
+            break;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
     capture.stop();
 
-    dbg!(&handler);
+    // dbg!(&handler);
     handler.save();
 }
 
@@ -85,65 +77,9 @@ impl DeviceInfo {
     }
 }
 
+#[derive(Debug)]
 struct ImageData {
-    timestamp: u64,
-    width: u32,
-    height: u32,
-    data: Vec<u8>,
-}
-
-impl std::fmt::Debug for ImageData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImageData")
-            .field("timestamp", &self.timestamp)
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("data", &self.data.len())
-            .finish()
-    }
-}
-
-impl ImageData {
-    fn save(&self) {
-        let mut img = RgbImage::new(self.width / 2, self.height);
-        for row in 0..self.height {
-            for col in (0..self.width).step_by(2) {
-                let index = ((row * self.width + col) as usize) * 2;
-
-                let u = self.data[index];
-                let y0 = self.data[index + 1];
-                let v = self.data[index + 2];
-                let y1 = self.data[index + 3];
-
-                // First pixel
-                let rgb0 = yuv_to_rgb(y0 as f32, u as f32, v as f32);
-                img.put_pixel(col, row, Rgb([rgb0[0], rgb0[1], rgb0[2]]));
-
-                // Second pixel
-                if col + 1 < self.width {
-                    let rgb1 = yuv_to_rgb(y1 as f32, u as f32, v as f32);
-                    img.put_pixel(col + 1, row, Rgb([rgb1[0], rgb1[1], rgb1[2]]));
-                }
-            }
-        }
-        img.save("output.png").unwrap();
-    }
-}
-
-fn yuv_to_rgb(y: f32, u: f32, v: f32) -> [u8; 3] {
-    let c = y - 16.0;
-    let d = u - 128.0;
-    let e = v - 128.0;
-
-    let r = (298.082 * c + 408.583 * e) / 256.0 + 128.0;
-    let g = (298.082 * c - 100.291 * d - 208.120 * e) / 256.0 + 128.0;
-    let b = (298.082 * c + 516.412 * d) / 256.0 + 128.0;
-
-    [clamp(r), clamp(g), clamp(b)]
-}
-
-fn clamp(value: f32) -> u8 {
-    value.round().clamp(0.0, 255.0) as u8
+    img: RgbImage,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -152,8 +88,16 @@ struct Handler {
 }
 
 impl Handler {
+    fn image_set(&self) -> bool {
+        if let Ok(img) = self.image.lock() {
+            img.is_some()
+        } else {
+            false
+        }
+    }
+
     fn handle(&self, frame: MediaFrame) {
-        println!("frame desc: {:?}", frame.description());
+        // println!("frame desc: {:?}", frame.description());
 
         let Ok(mapped_guard) = frame.map() else {
             return;
@@ -162,40 +106,65 @@ impl Handler {
             return;
         };
         for plane in planes {
-            let Some(width) = plane.stride() else {
-                continue;
+            match (plane.stride(), plane.height(), plane.data()) {
+                (Some(stride), Some(height), Some(data)) => self.record_img(stride, height, data),
+                _ => (),
             };
-            let Some(height) = plane.height() else {
-                continue;
-            };
-            let Some(data) = plane.data() else {
-                continue;
-            };
-
-            let mut image = self.image.lock().unwrap();
-            *image = Some(ImageData {
-                timestamp: frame.timestamp,
-                width,
-                height,
-                data: data.to_vec(),
-            });
         }
+    }
+
+    fn record_img(&self, stride: u32, height: u32, data: &[u8]) {
+        // For YUV422 format, the actual number of pixels is half the stride width
+        let width = stride / 2;
+        let mut img = RgbImage::new(width, height);
+
+        for row in 0..height {
+            for x in 0..width / 2 {
+                // Each 4 bytes represent 2 pixels in UYVY format
+                let idx = (row * stride + x * 4) as usize;
+
+                // Safety check to avoid out of bounds access
+                if idx + 3 >= data.len() {
+                    continue;
+                }
+
+                // Extract UYVY values
+                let u = data[idx];
+                let y0 = data[idx + 1];
+                let v = data[idx + 2];
+                let y1 = data[idx + 3];
+
+                // Convert to RGB
+                let rgb0 = yuv_to_rgb(y0 as f32, u as f32, v as f32);
+                let rgb1 = yuv_to_rgb(y1 as f32, u as f32, v as f32);
+
+                // Place both pixels in the output image
+                img.put_pixel(x * 2, row, Rgb([rgb0[0], rgb0[1], rgb0[2]]));
+                img.put_pixel(x * 2 + 1, row, Rgb([rgb1[0], rgb1[1], rgb1[2]]));
+            }
+        }
+
+        let mut image = self.image.lock().unwrap();
+        *image = Some(ImageData { img });
     }
 
     fn save(&self) {
         let image = self.image.lock().unwrap();
         if let Some(image) = image.as_ref() {
-            image.save();
+            image.img.save("output.png").unwrap();
+            println!("Image saved successfully");
+        } else {
+            eprintln!("No image to save");
         }
     }
 }
 
 pub struct DeviceCapture {
-    info: DeviceInfo,
     session: Id<AVCaptureSession>,
     input: Id<AVCaptureDeviceInput>,
     output: Id<AVCaptureVideoDataOutput>,
-    delegate: Id<OutputDelegate>,
+    // we have to keep a reference to the delegate to prevent it from being dropped
+    _delegate: Id<OutputDelegate>,
     running: bool,
 }
 
@@ -229,11 +198,10 @@ impl DeviceCapture {
         session.start_running();
 
         Ok(Self {
-            info: info.clone(),
             session,
             input,
             output,
-            delegate,
+            _delegate: delegate,
             running: true,
         })
     }
@@ -288,11 +256,9 @@ declare_class!(
                 .and_then(|image_buffer| image_buffer.downcast::<CVPixelBuffer>())
                 .and_then(|pixel_buffer| MediaFrame::from_pixel_buffer(&pixel_buffer).ok());
 
-            if let Some(mut video_frame) = video_frame {
-                if let Some(handler) = self.ivars().handler.as_ref() {
-                    video_frame.timestamp = (sample_buffer.get_presentation_time_stamp().get_seconds() * 1000.0) as u64;
-                    handler.handle(video_frame);
-                }
+            if let Some(video_frame) = video_frame {
+                let handler = self.ivars().handler.as_ref().unwrap();
+                handler.handle(video_frame);
             }
         }
     }
@@ -312,3 +278,19 @@ extern_methods!(
         pub fn new() -> Id<Self>;
     }
 );
+
+fn yuv_to_rgb(y: f32, u: f32, v: f32) -> [u8; 3] {
+    let c = y - 16.0;
+    let d = u - 128.0;
+    let e = v - 128.0;
+
+    let r = (298.082 * c + 408.583 * e) / 256.0 + 128.0;
+    let g = (298.082 * c - 100.291 * d - 208.120 * e) / 256.0 + 128.0;
+    let b = (298.082 * c + 516.412 * d) / 256.0 + 128.0;
+
+    [clamp(r), clamp(g), clamp(b)]
+}
+
+fn clamp(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
