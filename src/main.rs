@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use av_foundation::capture_device::AVCaptureDeviceTypeExternalUnknown;
 use av_foundation::{
@@ -26,6 +26,7 @@ use core_video::pixel_buffer::{
     kCVPixelFormatType_422YpCbCr8, kCVPixelFormatType_422YpCbCr8_yuvs, CVPixelBuffer, CVPixelBufferKeys,
 };
 use dispatch2::{Queue, QueueAttribute};
+use image::{Rgb, RgbImage};
 use objc2::{
     declare_class, extern_methods, msg_send_id, mutability,
     rc::{Allocated, Id, Retained},
@@ -44,9 +45,14 @@ fn main() {
     let device_info = devices.first().unwrap();
     let handler = Handler::default();
 
-    let _capture = DeviceCapture::start(&device_info, Arc::new(handler)).unwrap();
+    let mut capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
 
     std::thread::sleep(std::time::Duration::from_secs(1));
+
+    capture.stop();
+
+    dbg!(&handler);
+    handler.save();
 }
 
 #[derive(Clone, Debug)]
@@ -79,22 +85,75 @@ impl DeviceInfo {
     }
 }
 
-#[derive(Debug)]
 struct ImageData {
+    timestamp: u64,
     width: u32,
     height: u32,
     data: Vec<u8>,
 }
 
-#[derive(Debug, Default)]
+impl std::fmt::Debug for ImageData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageData")
+            .field("timestamp", &self.timestamp)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("data", &self.data.len())
+            .finish()
+    }
+}
+
+impl ImageData {
+    fn save(&self) {
+        let mut img = RgbImage::new(self.width / 2, self.height);
+        for row in 0..self.height {
+            for col in (0..self.width).step_by(2) {
+                let index = ((row * self.width + col) as usize) * 2;
+
+                let u = self.data[index];
+                let y0 = self.data[index + 1];
+                let v = self.data[index + 2];
+                let y1 = self.data[index + 3];
+
+                // First pixel
+                let rgb0 = yuv_to_rgb(y0 as f32, u as f32, v as f32);
+                img.put_pixel(col, row, Rgb([rgb0[0], rgb0[1], rgb0[2]]));
+
+                // Second pixel
+                if col + 1 < self.width {
+                    let rgb1 = yuv_to_rgb(y1 as f32, u as f32, v as f32);
+                    img.put_pixel(col + 1, row, Rgb([rgb1[0], rgb1[1], rgb1[2]]));
+                }
+            }
+        }
+        img.save("output.png").unwrap();
+    }
+}
+
+fn yuv_to_rgb(y: f32, u: f32, v: f32) -> [u8; 3] {
+    let c = y - 16.0;
+    let d = u - 128.0;
+    let e = v - 128.0;
+
+    let r = (298.082 * c + 408.583 * e) / 256.0 + 128.0;
+    let g = (298.082 * c - 100.291 * d - 208.120 * e) / 256.0 + 128.0;
+    let b = (298.082 * c + 516.412 * d) / 256.0 + 128.0;
+
+    [clamp(r), clamp(g), clamp(b)]
+}
+
+fn clamp(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+#[derive(Debug, Default, Clone)]
 struct Handler {
-    image: Option<ImageData>,
+    image: Arc<Mutex<Option<ImageData>>>,
 }
 
 impl Handler {
     fn handle(&self, frame: MediaFrame) {
         println!("frame desc: {:?}", frame.description());
-        println!("frame timestamp: {:?}", frame.timestamp);
 
         let Ok(mapped_guard) = frame.map() else {
             return;
@@ -103,27 +162,37 @@ impl Handler {
             return;
         };
         for plane in planes {
-            let Some(plane_width) = plane.stride() else {
+            let Some(width) = plane.stride() else {
                 continue;
             };
-            let Some(plane_height) = plane.height() else {
+            let Some(height) = plane.height() else {
                 continue;
             };
-            let Some(plane_data) = plane.data() else {
+            let Some(data) = plane.data() else {
                 continue;
             };
 
-            dbg!(plane_width, plane_height, plane_data.len());
+            let mut image = self.image.lock().unwrap();
+            *image = Some(ImageData {
+                timestamp: frame.timestamp,
+                width,
+                height,
+                data: data.to_vec(),
+            });
+        }
+    }
+
+    fn save(&self) {
+        let image = self.image.lock().unwrap();
+        if let Some(image) = image.as_ref() {
+            image.save();
         }
     }
 }
 
 pub struct DeviceCapture {
     info: DeviceInfo,
-    // formats: Vec<CameraFormat>,
-    // handler: Arc<Handler>,
     session: Id<AVCaptureSession>,
-    // device: Id<AVCaptureDevice>,
     input: Id<AVCaptureDeviceInput>,
     output: Id<AVCaptureVideoDataOutput>,
     delegate: Id<OutputDelegate>,
@@ -131,7 +200,7 @@ pub struct DeviceCapture {
 }
 
 impl DeviceCapture {
-    fn start(info: &DeviceInfo, handler: Arc<Handler>) -> Result<DeviceCapture, String> {
+    fn start(info: &DeviceInfo, handler: Handler) -> Result<DeviceCapture, String> {
         let session = AVCaptureSession::new();
         let id = NSString::from_str(&info.id);
         let device = AVCaptureDevice::device_with_unique_id(&id).ok_or("Device not found")?;
@@ -156,17 +225,12 @@ impl DeviceCapture {
 
         session.begin_configuration();
 
-        // let formats = get_formats(&device);
-
         session.commit_configuration();
         session.start_running();
 
         Ok(Self {
             info: info.clone(),
-            // formats,
-            // handler: handler.clone(),
             session,
-            // device,
             input,
             output,
             delegate,
@@ -192,7 +256,7 @@ impl Drop for DeviceCapture {
 
 #[derive(Default)]
 struct OutputDelegateIvars {
-    handler: Option<Arc<Handler>>,
+    handler: Option<Handler>,
 }
 
 declare_class!(
@@ -248,59 +312,3 @@ extern_methods!(
         pub fn new() -> Id<Self>;
     }
 );
-
-// fn get_formats(device: &AVCaptureDevice) -> Vec<CameraFormat> {
-//     device
-//         .formats()
-//         .iter()
-//         .filter_map(from_av_capture_device_format)
-//         .collect()
-// }
-
-// #[derive(Clone, Debug)]
-// struct CameraFormat {
-//     format: VideoFormat,
-//     color_range: ColorRange,
-//     width: u32,
-//     height: u32,
-//     frame_rates: Vec<f32>,
-// }
-
-// fn from_av_capture_device_format(format: &AVCaptureDeviceFormat) -> Option<CameraFormat> {
-//     if let Some(desc) = format.format_description().downcast_into::<CMVideoFormatDescription>() {
-//         let dimensions = desc.get_dimensions();
-//         match from_cm_codec_type(desc.get_codec_type()) {
-//             Some((video_format, color_range)) => {
-//                 let frame_rate_ranges = format.video_supported_frame_rate_ranges();
-//                 let frame_rates = frame_rate_ranges
-//                     .iter()
-//                     .map(|range| range.max_frame_rate() as f32)
-//                     .collect();
-
-//                 Some(CameraFormat {
-//                     format: video_format,
-//                     color_range,
-//                     width: dimensions.width as u32,
-//                     height: dimensions.height as u32,
-//                     frame_rates,
-//                 })
-//             }
-//             None => None,
-//         }
-//     } else {
-//         None
-//     }
-// }
-
-// fn from_cm_codec_type(codec_type: CMVideoCodecType) -> Option<(VideoFormat, ColorRange)> {
-//     #[allow(non_upper_case_globals)]
-//     match codec_type {
-//         kCVPixelFormatType_420YpCbCr8Planar => Some((VideoFormat::Pixel(PixelFormat::I420), ColorRange::Video)),
-//         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => {
-//             Some((VideoFormat::Pixel(PixelFormat::NV12), ColorRange::Video))
-//         }
-//         kCVPixelFormatType_422YpCbCr8_yuvs => Some((VideoFormat::Pixel(PixelFormat::YUYV), ColorRange::Video)),
-//         kCVPixelFormatType_422YpCbCr8 => Some((VideoFormat::Pixel(PixelFormat::UYVY), ColorRange::Video)),
-//         _ => None,
-//     }
-// }
