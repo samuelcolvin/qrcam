@@ -67,11 +67,11 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub fn image_set(&self) -> bool {
-        if let Ok(img) = self.image.lock() {
-            img.is_some()
+    pub fn take_img(&self) -> Option<RgbaImage> {
+        if let Ok(mut image) = self.image.lock() {
+            image.take().map(|image| image.img)
         } else {
-            false
+            None
         }
     }
 
@@ -125,22 +125,6 @@ impl Handler {
 
         let mut image = self.image.lock().unwrap();
         *image = Some(ImageData { img });
-    }
-
-    #[allow(dead_code)]
-    pub fn save(&self) {
-        let image = self.image.lock().unwrap();
-        if let Some(image) = image.as_ref() {
-            image.img.save("output.png").unwrap();
-            println!("Image saved successfully");
-        } else {
-            eprintln!("No image to save");
-        }
-    }
-
-    pub fn img(&self) -> Option<RgbaImage> {
-        let image = self.image.lock().unwrap();
-        image.as_ref().map(|image| image.img.clone())
     }
 }
 
