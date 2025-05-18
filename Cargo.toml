@@ -17,3 +17,7 @@ objc2-foundation = { version = "0.2", features = [
     "NSObject",
 ] }
 dispatch2 = "0.1"
+gpui = { git = "https://github.com/zed-industries/zed" }
+anyhow = "1.0.98"
+env_logger = "0.11.8"
+smallvec = "1.15.0"
