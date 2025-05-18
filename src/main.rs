@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use smallvec::smallvec;
 
 use gpui::{
-    actions, div, img, prelude::*, px, rgb, size, App, AppContext, Application, Bounds, Context, ImageSource,
-    KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer, TitlebarOptions, Window, WindowBounds,
-    WindowOptions,
+    actions, div, img, prelude::*, px, rgb, size, App, AppContext, Application, Bounds, Context, ImageCacheError,
+    ImageSource, KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer, TitlebarOptions, Window,
+    WindowBounds, WindowOptions,
 };
 use image::{Frame, RgbaImage};
 
@@ -16,7 +16,7 @@ mod camera;
 #[derive(Default)]
 struct ImageDisplay {
     _task: Option<Task<()>>,
-    text: Option<SharedString>,
+    text: SharedString,
     img: Option<RgbaImage>,
 }
 
@@ -32,7 +32,7 @@ impl ImageDisplay {
             let device_info = devices.first().unwrap();
 
             view.update(cx, |view, cx| {
-                view.text = Some(format!("Using {}", device_info.name).into());
+                view.text = format!("Using {}", device_info.name).into();
                 cx.notify();
             })
             .unwrap();
@@ -60,26 +60,23 @@ impl Render for ImageDisplay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start(window, cx);
 
-        let mut d = div()
+        let image_data = if let Some(qr_img) = self.img.take() {
+            let frame = Frame::new(qr_img);
+            let render_image = RenderImage::new(smallvec![frame]);
+            ImageSource::Render(render_image.into())
+        } else {
+            ImageSource::Image(gpui::Image::empty().into())
+        };
+
+        div()
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(0x000000))
             .text_color(rgb(0xffffff))
-            .items_center();
-
-        if let Some(qr_img) = self.img.take() {
-            let frame = Frame::new(qr_img);
-            let render_image = RenderImage::new(smallvec![frame]);
-            let image_data = ImageSource::Render(render_image.into());
-            d = d.child(img(image_data).size_full().object_fit(gpui::ObjectFit::Cover));
-        }
-
-        if let Some(text) = self.text.clone() {
-            d.child(text)
-        } else {
-            d
-        }
+            .items_center()
+            .child(img(image_data).size_full().object_fit(gpui::ObjectFit::Cover))
+            .child(self.text.clone())
     }
 }
 
