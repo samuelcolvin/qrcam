@@ -38,11 +38,17 @@ impl ImageDisplay {
             let handler = Handler::default();
 
             let _capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
+            // let decoder = bardecoder::default_decoder();
 
             loop {
                 Timer::after(Duration::from_millis(100)).await;
 
                 if let Some(img) = handler.take_img() {
+                    // let results = decoder.decode(&img);
+                    // for result in results {
+                    //     println!("{}", result.unwrap());
+                    // }
+
                     view.update(cx, |view, cx| {
                         view.img = Some(img);
                         cx.notify();
