@@ -1,11 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use smallvec::smallvec;
-
 use gpui::{
-    actions, div, img, prelude::*, px, rgb, size, App, AppContext, Application, Bounds, Context, ImageCacheError,
-    ImageSource, KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer, TitlebarOptions, Window,
-    WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, size, App, Application, Bounds, Context, ElementId, Entity, ImageCache,
+    ImageCacheProvider, ImageSource, KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer,
+    TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use image::{Frame, RgbaImage};
 
@@ -15,19 +13,19 @@ mod camera;
 
 #[derive(Default)]
 struct ImageDisplay {
-    _task: Option<Task<()>>,
+    task: Option<Task<()>>,
     text: SharedString,
     img: Option<RgbaImage>,
 }
 
 impl ImageDisplay {
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self._task.is_some() {
+        if self.task.is_some() {
             return;
         }
         cx.notify();
 
-        self._task = Some(cx.spawn_in(window, async move |view, cx| {
+        self.task = Some(cx.spawn_in(window, async move |view, cx| {
             let devices = DeviceInfo::find_all();
             let device_info = devices.first().unwrap();
 
@@ -60,20 +58,22 @@ impl Render for ImageDisplay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start(window, cx);
 
-        let image_data = if let Some(qr_img) = self.img.take() {
-            let frame = Frame::new(qr_img);
-            let render_image = RenderImage::new(smallvec![frame]);
-            ImageSource::Render(render_image.into())
+        let image_data = if let Some(qr_img) = self.img.as_ref() {
+            let frame = Frame::new(qr_img.clone());
+            let image_render = RenderImage::new(vec![frame]);
+            ImageSource::Render(image_render.into())
         } else {
             ImageSource::Image(gpui::Image::empty().into())
         };
 
         div()
+            .image_cache(no_image_cache("lru-cache"))
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x000000))
-            .text_color(rgb(0xffffff))
+            .font_family(".SystemUIFont")
+            .bg(gpui::black())
+            .text_color(gpui::white())
             .items_center()
             .child(img(image_data).size_full().object_fit(gpui::ObjectFit::Cover))
             .child(self.text.clone())
@@ -114,4 +114,37 @@ pub fn main() {
         cx.open_window(window_options, |_, cx| cx.new(|_| ImageDisplay::default()))
             .unwrap();
     });
+}
+
+fn no_image_cache(id: impl Into<ElementId>) -> NoCacheProvider {
+    NoCacheProvider(id.into())
+}
+
+struct NoCacheProvider(ElementId);
+
+impl ImageCacheProvider for NoCacheProvider {
+    fn provide(&mut self, window: &mut Window, cx: &mut App) -> gpui::AnyImageCache {
+        window
+            .with_global_id(self.0.clone(), |global_id, window| {
+                window.with_element_state::<Entity<NoImageCache>, _>(global_id, |no_cache, _| {
+                    let no_cache = no_cache.unwrap_or_else(|| cx.new(|_| NoImageCache::default()));
+                    (no_cache.clone(), no_cache)
+                })
+            })
+            .into()
+    }
+}
+
+#[derive(Default)]
+struct NoImageCache;
+
+impl ImageCache for NoImageCache {
+    fn load(
+        &mut self,
+        _resource: &gpui::Resource,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Result<Arc<gpui::RenderImage>, gpui::ImageCacheError>> {
+        None
+    }
 }
