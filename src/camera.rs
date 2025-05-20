@@ -99,8 +99,10 @@ impl Handler {
 
         for row in 0..height {
             for x in 0..width / 2 {
+                // flip the image horizontally
+                let x_reverse = width - x - 1;
                 // Each 4 bytes represent 2 pixels in UYVY format
-                let idx = (row * stride + x * 4) as usize;
+                let idx = (row * stride + x_reverse * 4) as usize;
 
                 // Safety check to avoid out of bounds access
                 if idx + 3 >= data.len() {
