@@ -1,9 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use gpui::{
-    actions, div, img, prelude::*, px, size, App, Application, Bounds, Context,
-    ImageSource, KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer,
-    TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, size, App, Application, Bounds, Context, ImageSource, KeyBinding, Menu,
+    MenuItem, Point, RenderImage, SharedString, Task, Timer, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use image::{Frame, RgbaImage};
 
@@ -14,7 +13,7 @@ mod camera;
 #[derive(Default)]
 struct ImageDisplay {
     task: Option<Task<()>>,
-    text: SharedString,
+    text: Option<SharedString>,
     img: Option<RgbaImage>,
     last_image: Option<Arc<RenderImage>>,
 }
@@ -30,7 +29,7 @@ impl ImageDisplay {
             let device_info = devices.first().unwrap();
 
             view.update(cx, |view, cx| {
-                view.text = device_info.name.clone().into();
+                view.text = Some(device_info.name.clone().into());
                 cx.notify();
             })
             .unwrap();
@@ -58,28 +57,34 @@ impl Render for ImageDisplay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start(window, cx);
 
-        let image_data = if let Some(qr_img) = self.img.as_ref() {
-            if let Some(last_image) = self.last_image.take() {
+        let image_data = if let Some(qr_img) = self.img.take() {
+            let frame = Frame::new(qr_img);
+            let image_render = Arc::new(RenderImage::new(vec![frame]));
+            if let Some(last_image) = self.last_image.replace(image_render.clone()) {
                 window.drop_image(last_image).unwrap();
             }
-            let frame = Frame::new(qr_img.clone());
-            let image_render = Arc::new(RenderImage::new(vec![frame]));
-            self.last_image = Some(image_render.clone());
             ImageSource::Render(image_render)
+        } else if let Some(last_image) = self.last_image.as_ref() {
+            ImageSource::Render(last_image.clone())
         } else {
             ImageSource::Image(gpui::Image::empty().into())
+        };
+
+        let text = match self.text.as_ref() {
+            Some(text) => text.clone(),
+            None => "Loading...".into(),
         };
 
         div()
             .size_full()
             .flex()
-            .flex_col()
+            .flex_col_reverse()
             .font_family(".SystemUIFont")
             .bg(gpui::black())
             .text_color(gpui::white())
             .items_center()
             .child(img(image_data).size_full().object_fit(gpui::ObjectFit::Cover))
-            .child(self.text.clone())
+            .child(text)
     }
 }
 
@@ -94,6 +99,7 @@ pub fn main() {
             cx.quit();
         })
         .detach();
+
         cx.set_menus(vec![Menu {
             name: "QR Cam".into(),
             items: vec![MenuItem::action("Quit", Quit)],
@@ -101,16 +107,15 @@ pub fn main() {
 
         let window_options = WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from("QR Cam")),
-                appears_transparent: false,
+                appears_transparent: true,
                 ..Default::default()
             }),
-
             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                size: size(px(1100.), px(600.)),
-                origin: Point::new(px(200.), px(200.)),
+                size: size(px(900.), px(480.)),
+                origin: Point::new(px(400.), px(100.)),
             })),
-
+            focus: true,
+            show: true,
             ..Default::default()
         };
 
