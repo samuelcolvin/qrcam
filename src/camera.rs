@@ -109,11 +109,12 @@ impl Handler {
                     continue;
                 }
 
-                // Extract UYVY values
-                let u = data[idx];
-                let y0 = data[idx + 1];
-                let v = data[idx + 2];
-                let y1 = data[idx + 3];
+                // Extract UYVY values - note because the image is flipped horizontally
+                // we select items in this order, not u, y0, v, y1
+                let v = data[idx];
+                let y1 = data[idx + 1];
+                let u = data[idx + 2];
+                let y0 = data[idx + 3];
 
                 // Convert to RGB
                 let rgb0 = yuv_to_rgb(y0 as f32, u as f32, v as f32);
@@ -251,9 +252,9 @@ extern_methods!(
 );
 
 fn yuv_to_rgb(y: f32, u: f32, v: f32) -> [u8; 3] {
-    let r = y + (1.772 * (u - 128.));
+    let r = y + (1.402 * (v - 128.));
     let g = y - (0.344136 * (u - 128.)) - (0.714136 * (v - 128.));
-    let b = y + (1.402 * (v - 128.));
+    let b = y + (1.772 * (u - 128.));
 
     [clamp(r), clamp(g), clamp(b)]
 }
