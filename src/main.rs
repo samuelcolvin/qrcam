@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use gpui::{
-    actions, div, img, prelude::*, px, size, App, Application, Bounds, Context, ElementId, Entity, ImageCache,
-    ImageCacheProvider, ImageSource, KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer,
+    actions, div, img, prelude::*, px, size, App, Application, Bounds, Context,
+    ImageSource, KeyBinding, Menu, MenuItem, Point, RenderImage, SharedString, Task, Timer,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use image::{Frame, RgbaImage};
@@ -16,6 +16,7 @@ struct ImageDisplay {
     task: Option<Task<()>>,
     text: SharedString,
     img: Option<RgbaImage>,
+    last_image: Option<Arc<RenderImage>>,
 }
 
 impl ImageDisplay {
@@ -23,14 +24,13 @@ impl ImageDisplay {
         if self.task.is_some() {
             return;
         }
-        cx.notify();
 
         self.task = Some(cx.spawn_in(window, async move |view, cx| {
             let devices = DeviceInfo::find_all();
             let device_info = devices.first().unwrap();
 
             view.update(cx, |view, cx| {
-                view.text = format!("Using {}", device_info.name).into();
+                view.text = device_info.name.clone().into();
                 cx.notify();
             })
             .unwrap();
@@ -38,17 +38,11 @@ impl ImageDisplay {
             let handler = Handler::default();
 
             let _capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
-            // let decoder = bardecoder::default_decoder();
 
             loop {
-                Timer::after(Duration::from_millis(100)).await;
+                Timer::after(Duration::from_millis(40)).await;
 
                 if let Some(img) = handler.take_img() {
-                    // let results = decoder.decode(&img);
-                    // for result in results {
-                    //     println!("{}", result.unwrap());
-                    // }
-
                     view.update(cx, |view, cx| {
                         view.img = Some(img);
                         cx.notify();
@@ -65,15 +59,18 @@ impl Render for ImageDisplay {
         self.start(window, cx);
 
         let image_data = if let Some(qr_img) = self.img.as_ref() {
+            if let Some(last_image) = self.last_image.take() {
+                window.drop_image(last_image).unwrap();
+            }
             let frame = Frame::new(qr_img.clone());
-            let image_render = RenderImage::new(vec![frame]);
-            ImageSource::Render(image_render.into())
+            let image_render = Arc::new(RenderImage::new(vec![frame]));
+            self.last_image = Some(image_render.clone());
+            ImageSource::Render(image_render)
         } else {
             ImageSource::Image(gpui::Image::empty().into())
         };
 
         div()
-            .image_cache(no_image_cache("lru-cache"))
             .size_full()
             .flex()
             .flex_col()
@@ -98,13 +95,13 @@ pub fn main() {
         })
         .detach();
         cx.set_menus(vec![Menu {
-            name: "QR Image".into(),
+            name: "QR Cam".into(),
             items: vec![MenuItem::action("Quit", Quit)],
         }]);
 
         let window_options = WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some(SharedString::from("Image Example")),
+                title: Some(SharedString::from("QR Cam")),
                 appears_transparent: false,
                 ..Default::default()
             }),
@@ -120,37 +117,4 @@ pub fn main() {
         cx.open_window(window_options, |_, cx| cx.new(|_| ImageDisplay::default()))
             .unwrap();
     });
-}
-
-fn no_image_cache(id: impl Into<ElementId>) -> NoCacheProvider {
-    NoCacheProvider(id.into())
-}
-
-struct NoCacheProvider(ElementId);
-
-impl ImageCacheProvider for NoCacheProvider {
-    fn provide(&mut self, window: &mut Window, cx: &mut App) -> gpui::AnyImageCache {
-        window
-            .with_global_id(self.0.clone(), |global_id, window| {
-                window.with_element_state::<Entity<NoImageCache>, _>(global_id, |no_cache, _| {
-                    let no_cache = no_cache.unwrap_or_else(|| cx.new(|_| NoImageCache::default()));
-                    (no_cache.clone(), no_cache)
-                })
-            })
-            .into()
-    }
-}
-
-#[derive(Default)]
-struct NoImageCache;
-
-impl ImageCache for NoImageCache {
-    fn load(
-        &mut self,
-        _resource: &gpui::Resource,
-        _window: &mut Window,
-        _cx: &mut App,
-    ) -> Option<Result<Arc<gpui::RenderImage>, gpui::ImageCacheError>> {
-        None
-    }
 }
