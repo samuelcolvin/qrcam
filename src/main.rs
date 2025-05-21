@@ -5,14 +5,16 @@ use gpui::{
 use image::{Frame, RgbaImage};
 use std::{sync::Arc, time::Duration};
 
-use camera::{DeviceCapture, DeviceInfo, Handler};
+use camera::{DeviceCapture, DeviceInfo};
+use decode::Decoder;
 use qr::QRCode;
 
 mod camera;
+mod decode;
 mod qr;
 
 struct ImageDisplay {
-    handler: Option<Handler>,
+    decoder: Option<Decoder>,
     task: Option<Task<()>>,
     camera: Option<SharedString>,
     qrcodes: Vec<QRCode>,
@@ -21,9 +23,9 @@ struct ImageDisplay {
 }
 
 impl ImageDisplay {
-    fn new(handler: Handler) -> Self {
+    fn new(decoder: Decoder) -> Self {
         Self {
-            handler: Some(handler),
+            decoder: Some(decoder),
             task: None,
             camera: None,
             qrcodes: Vec::new(),
@@ -33,7 +35,7 @@ impl ImageDisplay {
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(handler) = self.handler.take() else {
+        let Some(decoder) = self.decoder.take() else {
             return;
         };
 
@@ -47,12 +49,12 @@ impl ImageDisplay {
             })
             .unwrap();
 
-            let _capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
+            let _capture = DeviceCapture::start(&device_info, decoder.clone()).unwrap();
 
             loop {
                 Timer::after(Duration::from_millis(37)).await;
-                let opt_img = handler.take_img();
-                let opt_qrcodes = handler.take_qrcodes();
+                let opt_img = decoder.take_img();
+                let opt_qrcodes = decoder.take_qrcodes();
 
                 if opt_img.is_some() || opt_qrcodes.is_some() {
                     view.update(cx, |view, cx| {
@@ -125,13 +127,13 @@ pub fn main() {
         })
         .detach();
 
-        let handler = Handler::new();
-        let handler_display = handler.clone();
+        let decoder = Decoder::new();
+        let decoder_display = decoder.clone();
 
         cx.on_app_quit(move |_| {
-            let handler_quit = handler.clone();
+            let decoder_quit = decoder.clone();
             async move {
-                handler_quit.shutdown();
+                decoder_quit.shutdown();
             }
         })
         .detach();
@@ -155,7 +157,7 @@ pub fn main() {
             ..Default::default()
         };
 
-        cx.open_window(window_options, |_, cx| cx.new(|_| ImageDisplay::new(handler_display)))
+        cx.open_window(window_options, |_, cx| cx.new(|_| ImageDisplay::new(decoder_display)))
             .unwrap();
     });
 }
