@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use av_foundation::capture_device::AVCaptureDeviceTypeExternalUnknown;
@@ -16,7 +17,7 @@ use core_foundation::base::TCFType;
 use core_media::sample_buffer::{CMSampleBuffer, CMSampleBufferRef};
 use core_video::pixel_buffer::CVPixelBuffer;
 use dispatch2::{Queue, QueueAttribute};
-use image::{Rgba, RgbaImage};
+use image::{GrayImage, Luma, Rgba, RgbaImage};
 use objc2::{
     declare_class, extern_methods, msg_send_id, mutability,
     rc::{Allocated, Id},
@@ -25,6 +26,7 @@ use objc2::{
 };
 use objc2_foundation::{NSMutableArray, NSObject, NSObjectProtocol, NSString};
 use x_media::media_frame::MediaFrame;
+use zxingcpp::{Barcode, BarcodeFormat, BarcodeReader, Position};
 
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
@@ -57,19 +59,52 @@ impl DeviceInfo {
 }
 
 #[derive(Debug)]
-struct ImageData {
-    img: RgbaImage,
+pub struct QrCode {
+    text: String,
+    position: Position,
+}
+impl fmt::Display for QrCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} at {}/{}",
+            self.text, self.position.top_left, self.position.bottom_right
+        )
+    }
 }
 
-#[derive(Debug, Default, Clone)]
+impl Into<QrCode> for &Barcode {
+    fn into(self) -> QrCode {
+        QrCode {
+            text: self.text(),
+            position: self.position(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct QrImage {
+    img: RgbaImage,
+    qrcodes: Vec<QrCode>,
+}
+
+#[derive(Clone)]
 pub struct Handler {
-    image: Arc<Mutex<Option<ImageData>>>,
+    image: Arc<Mutex<Option<QrImage>>>,
+    barcode_reader: Arc<BarcodeReader>,
 }
 
 impl Handler {
-    pub fn take_img(&self) -> Option<RgbaImage> {
+    pub fn new() -> Self {
+        Self {
+            image: Arc::new(Mutex::new(None)),
+            barcode_reader: Arc::new(zxingcpp::read().formats(BarcodeFormat::QRCode).try_invert(false)),
+        }
+    }
+
+    pub fn take_img(&self) -> Option<(RgbaImage, Vec<QrCode>)> {
         if let Ok(mut image) = self.image.lock() {
-            image.take().map(|image| image.img)
+            image.take().map(|qr_image| (qr_image.img, qr_image.qrcodes))
         } else {
             None
         }
@@ -95,7 +130,8 @@ impl Handler {
     fn record_img(&self, stride: u32, height: u32, data: &[u8]) {
         // For YUV422 format, the actual number of pixels is half the stride width
         let width = stride / 2;
-        let mut img = RgbaImage::new(width, height);
+        let mut rgba_img = RgbaImage::new(width, height);
+        let mut grey_img = GrayImage::new(width, height);
 
         for row in 0..height {
             for x in 0..width / 2 {
@@ -121,13 +157,19 @@ impl Handler {
                 let rgb1 = yuv_to_rgb(y1 as f32, u as f32, v as f32);
 
                 // Place both pixels in the output image
-                img.put_pixel(x * 2, row, Rgba([rgb0[0], rgb0[1], rgb0[2], 255]));
-                img.put_pixel(x * 2 + 1, row, Rgba([rgb1[0], rgb1[1], rgb1[2], 255]));
+                rgba_img.put_pixel(x * 2, row, Rgba([rgb0[0], rgb0[1], rgb0[2], 255]));
+                rgba_img.put_pixel(x * 2 + 1, row, Rgba([rgb1[0], rgb1[1], rgb1[2], 255]));
+
+                grey_img.put_pixel(x * 2, row, Luma([y0]));
+                grey_img.put_pixel(x * 2 + 1, row, Luma([y1]));
             }
         }
 
+        let barcodes = self.barcode_reader.from(&grey_img).unwrap();
+        let qrcodes = barcodes.iter().map(Into::into).collect();
+
         let mut image = self.image.lock().unwrap();
-        *image = Some(ImageData { img });
+        *image = Some(QrImage { img: rgba_img, qrcodes });
     }
 }
 

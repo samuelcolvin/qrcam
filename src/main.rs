@@ -6,14 +6,15 @@ use gpui::{
 };
 use image::{Frame, RgbaImage};
 
-use camera::{DeviceCapture, DeviceInfo, Handler};
+use camera::{DeviceCapture, DeviceInfo, Handler, QrCode};
 
 mod camera;
 
 #[derive(Default)]
 struct ImageDisplay {
     task: Option<Task<()>>,
-    text: Option<SharedString>,
+    camera: Option<SharedString>,
+    qrcodes: Vec<QrCode>,
     img: Option<RgbaImage>,
     last_image: Option<Arc<RenderImage>>,
 }
@@ -29,21 +30,22 @@ impl ImageDisplay {
             let device_info = devices.first().unwrap();
 
             view.update(cx, |view, cx| {
-                view.text = Some(device_info.name.clone().into());
+                view.camera = Some(device_info.name.clone().into());
                 cx.notify();
             })
             .unwrap();
 
-            let handler = Handler::default();
+            let handler = Handler::new();
 
             let _capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
 
             loop {
                 Timer::after(Duration::from_millis(40)).await;
 
-                if let Some(img) = handler.take_img() {
+                if let Some((img, qrcodes)) = handler.take_img() {
                     view.update(cx, |view, cx| {
                         view.img = Some(img);
+                        view.qrcodes = qrcodes;
                         cx.notify();
                     })
                     .unwrap();
@@ -70,7 +72,7 @@ impl Render for ImageDisplay {
             ImageSource::Image(gpui::Image::empty().into())
         };
 
-        let text = match self.text.as_ref() {
+        let text = match self.camera.as_ref() {
             Some(text) => text.clone(),
             None => "Loading...".into(),
         };
@@ -84,6 +86,13 @@ impl Render for ImageDisplay {
             .text_color(gpui::white())
             .items_center()
             .child(img(image_data).size_full().object_fit(gpui::ObjectFit::Cover))
+            .child(
+                self.qrcodes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<String>>()
+                    .join("\n"),
+            )
             .child(text)
     }
 }
