@@ -1,5 +1,6 @@
-use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use av_foundation::capture_device::AVCaptureDeviceTypeExternalUnknown;
 use av_foundation::{
@@ -26,7 +27,8 @@ use objc2::{
 };
 use objc2_foundation::{NSMutableArray, NSObject, NSObjectProtocol, NSString};
 use x_media::media_frame::MediaFrame;
-use zxingcpp::{Barcode, BarcodeFormat, BarcodeReader, Position};
+
+use crate::qr::{decode_qr, QRCode};
 
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
@@ -58,56 +60,46 @@ impl DeviceInfo {
     }
 }
 
-#[derive(Debug)]
-pub struct QrCode {
-    text: String,
-    position: Position,
-}
-impl fmt::Display for QrCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} at {}/{}",
-            self.text, self.position.top_left, self.position.bottom_right
-        )
-    }
-}
-
-impl Into<QrCode> for &Barcode {
-    fn into(self) -> QrCode {
-        QrCode {
-            text: self.text(),
-            position: self.position(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct QrImage {
-    img: RgbaImage,
-    qrcodes: Vec<QrCode>,
-}
-
 #[derive(Clone)]
 pub struct Handler {
-    image: Arc<Mutex<Option<QrImage>>>,
-    barcode_reader: Arc<BarcodeReader>,
+    rgba_image: Arc<Mutex<Option<RgbaImage>>>,
+    grey_image: Arc<Mutex<Option<GrayImage>>>,
+    qrcodes: Arc<Mutex<Option<Vec<QRCode>>>>,
+    stop: Arc<AtomicBool>,
+    join_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl Handler {
     pub fn new() -> Self {
+        let grey_image = Arc::new(Mutex::new(None));
+        let grey_image_mov = grey_image.clone();
+        let qrcodes = Arc::new(Mutex::new(None));
+        let qrcodes_mov = qrcodes.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_mov = stop.clone();
+        let join_handle = thread::spawn(move || decode_qr(grey_image_mov, qrcodes_mov, stop_mov));
         Self {
-            image: Arc::new(Mutex::new(None)),
-            barcode_reader: Arc::new(zxingcpp::read().formats(BarcodeFormat::QRCode).try_invert(false)),
+            rgba_image: Arc::new(Mutex::new(None)),
+            grey_image,
+            qrcodes,
+            stop,
+            join_handle: Arc::new(Mutex::new(Some(join_handle))),
         }
     }
 
-    pub fn take_img(&self) -> Option<(RgbaImage, Vec<QrCode>)> {
-        if let Ok(mut image) = self.image.lock() {
-            image.take().map(|qr_image| (qr_image.img, qr_image.qrcodes))
-        } else {
-            None
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.join_handle.lock().ok().and_then(|mut h| h.take()) {
+            handle.join().unwrap();
         }
+    }
+
+    pub fn take_img(&self) -> Option<RgbaImage> {
+        self.rgba_image.lock().ok().and_then(|mut img| img.take())
+    }
+
+    pub fn take_qrcodes(&self) -> Option<Vec<QRCode>> {
+        self.qrcodes.lock().ok().and_then(|mut qrcodes| qrcodes.take())
     }
 
     fn handle(&self, frame: MediaFrame) {
@@ -164,12 +156,12 @@ impl Handler {
                 grey_img.put_pixel(x * 2 + 1, row, Luma([y1]));
             }
         }
-
-        let barcodes = self.barcode_reader.from(&grey_img).unwrap();
-        let qrcodes = barcodes.iter().map(Into::into).collect();
-
-        let mut image = self.image.lock().unwrap();
-        *image = Some(QrImage { img: rgba_img, qrcodes });
+        if let Ok(mut image) = self.rgba_image.lock() {
+            *image = Some(rgba_img);
+        }
+        if let Ok(mut grey_image) = self.grey_image.lock() {
+            *grey_image = Some(grey_img);
+        }
     }
 }
 

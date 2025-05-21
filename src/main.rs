@@ -1,29 +1,41 @@
-use std::{sync::Arc, time::Duration};
-
 use gpui::{
     actions, div, img, prelude::*, px, size, App, Application, Bounds, Context, ImageSource, KeyBinding, Menu,
     MenuItem, Point, RenderImage, SharedString, Task, Timer, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use image::{Frame, RgbaImage};
+use std::{sync::Arc, time::Duration};
 
-use camera::{DeviceCapture, DeviceInfo, Handler, QrCode};
+use camera::{DeviceCapture, DeviceInfo, Handler};
+use qr::QRCode;
 
 mod camera;
+mod qr;
 
-#[derive(Default)]
 struct ImageDisplay {
+    handler: Option<Handler>,
     task: Option<Task<()>>,
     camera: Option<SharedString>,
-    qrcodes: Vec<QrCode>,
+    qrcodes: Vec<QRCode>,
     img: Option<RgbaImage>,
     last_image: Option<Arc<RenderImage>>,
 }
 
 impl ImageDisplay {
-    fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.task.is_some() {
-            return;
+    fn new(handler: Handler) -> Self {
+        Self {
+            handler: Some(handler),
+            task: None,
+            camera: None,
+            qrcodes: Vec::new(),
+            img: None,
+            last_image: None,
         }
+    }
+
+    fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(handler) = self.handler.take() else {
+            return;
+        };
 
         self.task = Some(cx.spawn_in(window, async move |view, cx| {
             let devices = DeviceInfo::find_all();
@@ -35,17 +47,21 @@ impl ImageDisplay {
             })
             .unwrap();
 
-            let handler = Handler::new();
-
             let _capture = DeviceCapture::start(&device_info, handler.clone()).unwrap();
 
             loop {
-                Timer::after(Duration::from_millis(40)).await;
+                Timer::after(Duration::from_millis(37)).await;
+                let opt_img = handler.take_img();
+                let opt_qrcodes = handler.take_qrcodes();
 
-                if let Some((img, qrcodes)) = handler.take_img() {
+                if opt_img.is_some() || opt_qrcodes.is_some() {
                     view.update(cx, |view, cx| {
-                        view.img = Some(img);
-                        view.qrcodes = qrcodes;
+                        if let Some(img) = opt_img {
+                            view.img = Some(img);
+                        }
+                        if let Some(qrcodes) = opt_qrcodes {
+                            view.qrcodes = qrcodes;
+                        }
                         cx.notify();
                     })
                     .unwrap();
@@ -97,7 +113,7 @@ impl Render for ImageDisplay {
     }
 }
 
-actions!(image, [Quit]);
+actions!(qr_cam, [Quit]);
 
 pub fn main() {
     Application::new().run(move |cx: &mut App| {
@@ -106,6 +122,17 @@ pub fn main() {
         cx.bind_keys([KeyBinding::new("ctrl-c", Quit, None)]);
         cx.on_window_closed(|cx| {
             cx.quit();
+        })
+        .detach();
+
+        let handler = Handler::new();
+        let handler_display = handler.clone();
+
+        cx.on_app_quit(move |_| {
+            let handler_quit = handler.clone();
+            async move {
+                handler_quit.shutdown();
+            }
         })
         .detach();
 
@@ -128,7 +155,7 @@ pub fn main() {
             ..Default::default()
         };
 
-        cx.open_window(window_options, |_, cx| cx.new(|_| ImageDisplay::default()))
+        cx.open_window(window_options, |_, cx| cx.new(|_| ImageDisplay::new(handler_display)))
             .unwrap();
     });
 }
